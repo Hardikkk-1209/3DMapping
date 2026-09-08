@@ -8,13 +8,13 @@ This directory is the compute-heavy half of 3DMapping. The Mac runs only the Nex
 2. Browser uploads the original video to this worker.
 3. FFmpeg extracts reconstruction frames at a conservative configurable rate.
 4. COLMAP extracts GPU-accelerated local features.
-5. COLMAP sequentially matches adjacent/nearby video frames. Sequential matching is specifically intended for sequential image acquisition such as video. citeturn0search2
+5. COLMAP sequentially matches adjacent/nearby video frames; this matching mode is intended for sequential image acquisition such as video.
 6. COLMAP incremental SfM estimates camera poses and sparse geometry.
 7. The worker checks the registered-frame ratio and stops early when coverage is insufficient.
 8. COLMAP undistorts the registered scene into a Gaussian-Splatting-ready dataset.
 9. GraphDeco Gaussian Splatting trains the scene on the NVIDIA GPU.
 10. The resulting `point_cloud.ply` is exposed through a range-enabled artifact endpoint.
-11. The browser loads the PLY into `@mkkellogg/gaussian-splats-3d` and provides an interactive WebGL viewer. The viewer supports `.ply`, `.splat`, and `.ksplat` scenes. citeturn0search0
+11. The browser loads the PLY into `@mkkellogg/gaussian-splats-3d` and provides an interactive WebGL viewer.
 
 ## System requirements
 
