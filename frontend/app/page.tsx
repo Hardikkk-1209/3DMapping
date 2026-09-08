@@ -18,7 +18,7 @@ type Report = {
   };
 };
 
-const SAMPLE_COUNT = 24;
+const SAMPLE_COUNT = 12;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -43,7 +43,7 @@ function frameMetrics(ctx: CanvasRenderingContext2D, width: number, height: numb
 
   let edgeEnergy = 0;
   let count = 0;
-  const step = Math.max(1, Math.floor(Math.min(width, height) / 180));
+  const step = Math.max(2, Math.floor(Math.min(width, height) / 180));
   for (let y = step; y < height - step; y += step) {
     for (let x = step; x < width - step; x += step) {
       const c = gray[y * width + x];
@@ -54,51 +54,76 @@ function frameMetrics(ctx: CanvasRenderingContext2D, width: number, height: numb
     }
   }
 
-  const sharpness = count ? edgeEnergy / count : 0;
-  return { gray, brightness, motion, sharpness };
+  return { gray, brightness, motion, sharpness: count ? edgeEnergy / count : 0 };
+}
+
+async function waitForEvent(video: HTMLVideoElement, eventName: string, timeoutMs = 10000) {
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Video decoding timed out while waiting for ${eventName}.`));
+    }, timeoutMs);
+    const done = () => { cleanup(); resolve(); };
+    const fail = () => { cleanup(); reject(new Error('The browser could not decode this video.')); };
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      video.removeEventListener(eventName, done);
+      video.removeEventListener('error', fail);
+    };
+    video.addEventListener(eventName, done, { once: true });
+    video.addEventListener('error', fail, { once: true });
+  });
 }
 
 async function seek(video: HTMLVideoElement, time: number) {
+  const target = Math.min(time, Math.max(0, video.duration - 0.05));
+  if (Math.abs(video.currentTime - target) < 0.02 && video.readyState >= 2) return;
+
   await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error('The browser could not seek to a sampled frame. Try a standard H.264 MP4.'));
+    }, 10000);
     const done = () => { cleanup(); resolve(); };
-    const fail = () => { cleanup(); reject(new Error('Could not seek through the video.')); };
+    const fail = () => { cleanup(); reject(new Error('The browser could not seek through this video.')); };
     const cleanup = () => {
+      window.clearTimeout(timer);
       video.removeEventListener('seeked', done);
       video.removeEventListener('error', fail);
     };
     video.addEventListener('seeked', done, { once: true });
     video.addEventListener('error', fail, { once: true });
-    video.currentTime = time;
+    video.currentTime = target;
   });
 }
 
-async function analyzeInBrowser(file: File): Promise<Report> {
+async function analyzeInBrowser(file: File, onProgress: (value: number) => void): Promise<Report> {
   const url = URL.createObjectURL(file);
   const video = document.createElement('video');
-  video.preload = 'metadata';
+  video.preload = 'auto';
   video.muted = true;
   video.playsInline = true;
   video.src = url;
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      video.onloadedmetadata = () => resolve();
-      video.onerror = () => reject(new Error('The browser could not decode this video.'));
-    });
+    await waitForEvent(video, 'loadedmetadata');
+    await waitForEvent(video, 'loadeddata');
 
     const width = video.videoWidth;
     const height = video.videoHeight;
     const duration = video.duration || 0;
-    if (!width || !height || !duration) throw new Error('Video metadata is incomplete.');
+    if (!width || !height || !Number.isFinite(duration) || duration <= 0) {
+      throw new Error('Video metadata is incomplete.');
+    }
 
     const canvas = document.createElement('canvas');
-    const scale = Math.min(1, 720 / width);
+    const scale = Math.min(1, 640 / width);
     canvas.width = Math.max(160, Math.round(width * scale));
     canvas.height = Math.max(90, Math.round(height * scale));
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) throw new Error('Canvas analysis is unavailable in this browser.');
 
-    const count = Math.min(SAMPLE_COUNT, Math.max(6, Math.round(duration * 2)));
+    const count = Math.min(SAMPLE_COUNT, Math.max(6, Math.ceil(duration * 1.5)));
     const times = Array.from({ length: count }, (_, i) => duration * (i + 0.5) / count);
     const sharpness: number[] = [];
     const brightness: number[] = [];
@@ -106,17 +131,16 @@ async function analyzeInBrowser(file: File): Promise<Report> {
     let previous: Uint8ClampedArray | null = null;
     let usable = 0;
 
-    for (const time of times) {
-      await seek(video, Math.min(time, Math.max(0, duration - 0.05)));
+    for (let i = 0; i < times.length; i++) {
+      onProgress(12 + Math.round((i / count) * 78));
+      await seek(video, times[i]);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const metrics = frameMetrics(ctx, canvas.width, canvas.height, previous);
       sharpness.push(metrics.sharpness);
       brightness.push(metrics.brightness);
       motion.push(metrics.motion);
       previous = metrics.gray;
-      const goodExposure = metrics.brightness > 28 && metrics.brightness < 228;
-      const goodDetail = metrics.sharpness > 70;
-      if (goodExposure && goodDetail) usable++;
+      if (metrics.brightness > 28 && metrics.brightness < 228 && metrics.sharpness > 70) usable++;
     }
 
     const avgSharpness = sharpness.reduce((a, b) => a + b, 0) / sharpness.length;
@@ -138,6 +162,7 @@ async function analyzeInBrowser(file: File): Promise<Report> {
     if (avgMotion < 2) warnings.push('Very little scene change was detected; ensure the camera moves around the subject.');
     if (duration < 10) warnings.push('Short footage may provide limited viewpoint coverage.');
 
+    onProgress(100);
     return {
       filename: file.name,
       bytes: file.size,
@@ -169,20 +194,17 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const prevent = (event: DragEvent) => { event.preventDefault(); };
+    const prevent = (event: DragEvent) => event.preventDefault();
     window.addEventListener('dragover', prevent);
     window.addEventListener('drop', prevent);
     return () => { window.removeEventListener('dragover', prevent); window.removeEventListener('drop', prevent); };
   }, []);
 
   async function analyze() {
-    if (!file) return;
-    setBusy(true); setError(''); setResult(null); setProgress(10);
+    if (!file || busy) return;
+    setBusy(true); setError(''); setResult(null); setProgress(5);
     try {
-      const timer = window.setInterval(() => setProgress(p => Math.min(90, p + 8)), 180);
-      const data = await analyzeInBrowser(file);
-      window.clearInterval(timer);
-      setProgress(100);
+      const data = await analyzeInBrowser(file, setProgress);
       setResult(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Analysis failed');
@@ -195,11 +217,11 @@ export default function Home() {
   const verdict = score >= 75 ? 'RECONSTRUCTION READY' : score >= 50 ? 'REVIEW CAPTURE' : 'LOW CONFIDENCE';
 
   return <main>
-    <nav><strong>3D<span>MAPPING</span></strong><div>DRONE RECONSTRUCTION · 04</div></nav>
+    <nav><strong>3D<span>MAPPING</span></strong><div>DRONE RECONSTRUCTION · 05</div></nav>
     <section className="hero">
       <p className="eyebrow">DRONE → 3D RECONSTRUCTION</p>
       <h1>Turn aerial footage<br/><i>into a 3D world.</i></h1>
-      <p className="sub">Upload ordinary drone footage. The browser performs the first capture-quality pass locally, so the interface works without a Python server. Reconstruction itself remains a separate GPU worker.</p>
+      <p className="sub">Upload ordinary drone footage. The browser performs the first capture-quality pass locally. Reconstruction itself remains a separate GPU worker.</p>
       <div className="drop" onClick={() => inputRef.current?.click()} onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) setFile(f); }}>
         <input ref={inputRef} type="file" accept="video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska" hidden onChange={e => { setFile(e.target.files?.[0] || null); setResult(null); setError(''); }} />
         <div className="plus">+</div>
@@ -207,6 +229,7 @@ export default function Home() {
         <small>MP4 · MOV · M4V · AVI · MKV</small>
       </div>
       <button disabled={!file || busy} onClick={analyze}>{busy ? `ANALYZING FOOTAGE ${progress}%…` : 'ANALYZE FOOTAGE →'}</button>
+      {busy && <p className="note">Decoding sampled video frames in your browser. This can take a few seconds.</p>}
       {error && <p className="error">{error}</p>}
     </section>
 
