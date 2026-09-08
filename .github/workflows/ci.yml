@@ -1,0 +1,28 @@
+name: Validate 3DMapping
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate worker Python
+        run: python3 -m py_compile worker/reconstruct.py worker/server.py
+
+      - name: Install frontend
+        working-directory: frontend
+        run: npm install
+
+      - name: Typecheck frontend
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
