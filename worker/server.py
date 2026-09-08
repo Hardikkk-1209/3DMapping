@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""HTTP gateway for the Linux/NVIDIA reconstruction worker.
-
-The Mac/Next.js control station uploads a video here, polls /jobs/{id}, and
-loads the final Gaussian PLY from /jobs/{id}/artifact/{relative-path}.
-"""
+"""HTTP gateway for the Linux/NVIDIA reconstruction worker."""
 from __future__ import annotations
 
 import json
@@ -25,6 +21,7 @@ HOST = os.environ.get("WORKER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("WORKER_PORT", "8080"))
 MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
 CORS = os.environ.get("WORKER_CORS", "*")
+API_KEY = os.environ.get("WORKER_API_KEY", "")
 JOBS.mkdir(parents=True, exist_ok=True)
 
 
@@ -39,20 +36,15 @@ def launch(job_id: str, video: Path, job_dir: Path) -> None:
     result = job_dir / "result.json"
     try:
         cmd = [
-            os.environ.get("PYTHON", "python3"),
-            str(RECONSTRUCT),
-            "--input", str(video),
-            "--job", str(job_dir),
+            os.environ.get("PYTHON", "python3"), str(RECONSTRUCT),
+            "--input", str(video), "--job", str(job_dir),
             "--fps", os.environ.get("RECONSTRUCTION_FPS", "4"),
             "--max-frames", os.environ.get("RECONSTRUCTION_MAX_FRAMES", "160"),
             "--iterations", os.environ.get("SPLAT_ITERATIONS", "30000"),
         ]
         subprocess.run(cmd, cwd=ROOT, check=False)
     except Exception as exc:
-        result.write_text(json.dumps({
-            "status": "failed", "stage": "worker", "progress": 0,
-            "message": str(exc), "error": str(exc)
-        }, indent=2))
+        result.write_text(json.dumps({"status": "failed", "stage": "worker", "progress": 0, "message": str(exc), "error": str(exc)}, indent=2))
 
 
 def safe_artifact(job_dir: Path, relative: str) -> Path | None:
@@ -67,7 +59,12 @@ def safe_artifact(job_dir: Path, relative: str) -> Path | None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "3DMappingWorker/0.2"
+    server_version = "3DMappingWorker/0.3"
+
+    def authorized(self) -> bool:
+        if not API_KEY:
+            return True
+        return self.headers.get("X-3DMapping-Key", "") == API_KEY
 
     def send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -75,15 +72,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", CORS)
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-3DMapping-Key")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         self.end_headers()
         self.wfile.write(body)
 
     def send_file(self, path: Path) -> None:
         size = path.stat().st_size
-        start = 0
-        end = size - 1
+        start, end = 0, size - 1
         range_header = self.headers.get("Range", "")
         if range_header.startswith("bytes="):
             try:
@@ -93,10 +89,8 @@ class Handler(BaseHTTPRequestHandler):
                     start = int(left)
                     end = int(right) if right else end
                 else:
-                    length = int(right)
-                    start = max(0, size - length)
-                start = max(0, start)
-                end = min(size - 1, end)
+                    start = max(0, size - int(right))
+                start, end = max(0, start), min(size - 1, end)
                 if start > end:
                     raise ValueError
             except ValueError:
@@ -104,7 +98,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-        length = end - start + 1
+        length = max(0, end - start + 1)
         self.send_response(206 if range_header else 200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(length))
@@ -130,7 +124,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
-            self.send_json(200, {"status": "ok", "service": "3dmapping-worker", "version": "0.2"})
+            self.send_json(200, {"status": "ok", "service": "3dmapping-worker", "version": "0.3", "auth_enabled": bool(API_KEY)})
+            return
+        if not self.authorized():
+            self.send_json(401, {"error": "unauthorized"})
             return
 
         parts = parsed.path.strip("/").split("/")
@@ -161,6 +158,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self.authorized():
+            self.send_json(401, {"error": "unauthorized"})
+            return
         parsed = urlparse(self.path)
         if parsed.path != "/jobs":
             self.send_json(404, {"error": "not found"})
@@ -178,13 +178,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         raw = self.rfile.read(length)
-        msg = BytesParser(policy=default).parsebytes(
-            (f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n").encode() + raw
-        )
-        part = next((
-            p for p in msg.iter_parts()
-            if p.get_param("name", header="Content-Disposition") == "video"
-        ), None)
+        msg = BytesParser(policy=default).parsebytes((f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n").encode() + raw)
+        part = next((p for p in msg.iter_parts() if p.get_param("name", header="Content-Disposition") == "video"), None)
         if part is None:
             self.send_json(400, {"error": "missing multipart field 'video'"})
             return
@@ -215,5 +210,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"3DMapping worker listening on http://{HOST}:{PORT}", flush=True)
+    print(f"3DMapping worker listening on http://{HOST}:{PORT} (auth={'on' if API_KEY else 'off'})", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
