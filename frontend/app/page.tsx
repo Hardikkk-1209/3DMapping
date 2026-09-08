@@ -1,5 +1,6 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import { useEffect, useRef, useState } from 'react';
 
 type Report = {
@@ -18,7 +19,25 @@ type Report = {
   };
 };
 
+type WorkerJob = {
+  job_id: string;
+  filename?: string;
+  status: string;
+  stage?: string;
+  progress?: number;
+  message?: string;
+  error?: string;
+  artifact_url?: string;
+  extracted_frames?: number;
+  registered_images?: number;
+  registration_ratio?: number;
+  input?: { width?: number; height?: number; fps?: number; frames?: number; duration_s?: number; codec?: string };
+  duration_s?: number;
+};
+
+const SplatViewer = dynamic(() => import('./components/SplatViewer'), { ssr: false });
 const SAMPLE_COUNT = 12;
+const WORKER_URL = (process.env.NEXT_PUBLIC_WORKER_URL || 'http://localhost:8080').replace(/\/$/, '');
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -112,9 +131,7 @@ async function analyzeInBrowser(file: File, onProgress: (value: number) => void)
     const width = video.videoWidth;
     const height = video.videoHeight;
     const duration = video.duration || 0;
-    if (!width || !height || !Number.isFinite(duration) || duration <= 0) {
-      throw new Error('Video metadata is incomplete.');
-    }
+    if (!width || !height || !Number.isFinite(duration) || duration <= 0) throw new Error('Video metadata is incomplete.');
 
     const canvas = document.createElement('canvas');
     const scale = Math.min(1, 640 / width);
@@ -147,7 +164,6 @@ async function analyzeInBrowser(file: File, onProgress: (value: number) => void)
     const avgBrightness = brightness.reduce((a, b) => a + b, 0) / brightness.length;
     const avgMotion = motion.slice(1).reduce((a, b) => a + b, 0) / Math.max(1, motion.length - 1);
     const usableRatio = usable / count;
-
     const sharpScore = clamp((avgSharpness - 35) / 220, 0, 1);
     const exposureScore = clamp(1 - Math.abs(avgBrightness - 128) / 128, 0, 1);
     const motionScore = clamp(avgMotion / 28, 0, 1);
@@ -185,9 +201,34 @@ async function analyzeInBrowser(file: File, onProgress: (value: number) => void)
   }
 }
 
+async function createWorkerJob(file: File): Promise<string> {
+  const body = new FormData();
+  body.append('video', file, file.name);
+  const response = await fetch(`${WORKER_URL}/jobs`, { method: 'POST', body });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(detail || `GPU worker rejected the upload (${response.status}).`);
+  }
+  const data = await response.json() as { job_id?: string };
+  if (!data.job_id) throw new Error('GPU worker did not return a job id.');
+  return data.job_id;
+}
+
+async function pollWorkerJob(jobId: string, onJob: (job: WorkerJob) => void) {
+  for (;;) {
+    const response = await fetch(`${WORKER_URL}/jobs/${jobId}`, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`GPU worker status request failed (${response.status}).`);
+    const job = await response.json() as WorkerJob;
+    onJob(job);
+    if (['completed', 'failed', 'insufficient_registration', 'colmap_ready'].includes(job.status)) return job;
+    await new Promise(resolve => window.setTimeout(resolve, 1800));
+  }
+}
+
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<Report | null>(null);
+  const [job, setJob] = useState<WorkerJob | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
@@ -200,14 +241,21 @@ export default function Home() {
     return () => { window.removeEventListener('dragover', prevent); window.removeEventListener('drop', prevent); };
   }, []);
 
-  async function analyze() {
+  async function analyzeAndReconstruct() {
     if (!file || busy) return;
-    setBusy(true); setError(''); setResult(null); setProgress(5);
+    setBusy(true); setError(''); setResult(null); setJob(null); setProgress(5);
     try {
       const data = await analyzeInBrowser(file, setProgress);
       setResult(data);
+      setProgress(100);
+
+      const jobId = await createWorkerJob(file);
+      setJob({ job_id: jobId, status: 'queued', stage: 'queued', progress: 0, message: 'Video uploaded to GPU worker.' });
+      const finalJob = await pollWorkerJob(jobId, setJob);
+      if (finalJob.status === 'failed') throw new Error(finalJob.error || finalJob.message || 'GPU reconstruction failed.');
+      if (finalJob.status === 'insufficient_registration') throw new Error(finalJob.error || finalJob.message || 'The footage did not register well enough for reconstruction.');
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Analysis failed');
+      setError(e instanceof Error ? e.message : 'Pipeline failed');
     } finally {
       setBusy(false);
     }
@@ -215,46 +263,72 @@ export default function Home() {
 
   const score = result?.quality.score ?? 0;
   const verdict = score >= 75 ? 'RECONSTRUCTION READY' : score >= 50 ? 'REVIEW CAPTURE' : 'LOW CONFIDENCE';
+  const gpuProgress = job?.progress ?? 0;
+  const completed = job?.status === 'completed' && !!job.artifact_url;
+  const artifactUrl = job?.artifact_url ? `${WORKER_URL}${job.artifact_url}` : '';
+  const stage = job?.stage || 'idle';
 
   return <main>
     <nav><strong>3D<span>MAPPING</span></strong><div>DRONE RECONSTRUCTION · 05</div></nav>
     <section className="hero">
       <p className="eyebrow">DRONE → 3D RECONSTRUCTION</p>
       <h1>Turn aerial footage<br/><i>into a 3D world.</i></h1>
-      <p className="sub">Upload ordinary drone footage. The browser performs the first capture-quality pass locally. Reconstruction itself remains a separate GPU worker.</p>
+      <p className="sub">Upload ordinary drone footage. The browser checks capture quality first, then sends the original video to the GPU worker for COLMAP camera recovery and Gaussian Splat training.</p>
       <div className="drop" onClick={() => inputRef.current?.click()} onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) setFile(f); }}>
-        <input ref={inputRef} type="file" accept="video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska" hidden onChange={e => { setFile(e.target.files?.[0] || null); setResult(null); setError(''); }} />
+        <input ref={inputRef} type="file" accept="video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska" hidden onChange={e => { setFile(e.target.files?.[0] || null); setResult(null); setJob(null); setError(''); }} />
         <div className="plus">+</div>
         <div>{file ? file.name : 'DROP DRONE VIDEO HERE'}</div>
         <small>MP4 · MOV · M4V · AVI · MKV</small>
       </div>
-      <button disabled={!file || busy} onClick={analyze}>{busy ? `ANALYZING FOOTAGE ${progress}%…` : 'ANALYZE FOOTAGE →'}</button>
-      {busy && <p className="note">Decoding sampled video frames in your browser. This can take a few seconds.</p>}
+      <button disabled={!file || busy} onClick={analyzeAndReconstruct}>{busy ? `RECONSTRUCTING ${Math.max(progress, gpuProgress)}%…` : 'ANALYZE + RECONSTRUCT →'}</button>
+      {busy && <p className="note">Local capture analysis is followed by a real GPU reconstruction job. The worker status below updates as each stage finishes.</p>}
       {error && <p className="error">{error}</p>}
     </section>
 
     {result && <section className="result">
       <div className="reportHead">
-        <div><p className="eyebrow">LOCAL CAPTURE REPORT</p><h2>{result.filename}</h2></div>
+        <div><p className="eyebrow">CAPTURE + RECONSTRUCTION REPORT</p><h2>{result.filename}</h2></div>
         <div className="verdict"><b>{score}</b><small>{verdict}</small></div>
       </div>
       <div className="stats">
-        <div><b>{result.video.width}×{result.video.height}</b><small>RESOLUTION</small></div>
-        <div><b>—</b><small>FPS · METADATA WORKER</small></div>
-        <div><b>—</b><small>FRAME COUNT · METADATA WORKER</small></div>
-        <div><b>{result.video.duration_s}s</b><small>DURATION</small></div>
-        <div><b>{result.sampling.usable_keyframes}</b><small>USABLE SAMPLED VIEWS</small></div>
+        <div><b>{job?.input?.width || result.video.width}×{job?.input?.height || result.video.height}</b><small>RESOLUTION</small></div>
+        <div><b>{job?.input?.fps ? `${job.input.fps}` : '—'}</b><small>FPS · GPU METADATA</small></div>
+        <div><b>{job?.input?.frames || '—'}</b><small>FRAME COUNT · GPU METADATA</small></div>
+        <div><b>{job?.input?.duration_s || result.video.duration_s}s</b><small>DURATION</small></div>
+        <div><b>{result.sampling.usable_keyframes}</b><small>USABLE LOCAL VIEWS</small></div>
       </div>
       <div className="metrics">
         <div><span>DETAIL ENERGY</span><strong>{result.quality.average_sharpness}</strong></div>
         <div><span>SCENE MOTION</span><strong>{result.quality.average_motion}</strong></div>
         <div><span>USABLE RATIO</span><strong>{Math.round(result.quality.usable_ratio * 100)}%</strong></div>
       </div>
-      <div className="pipeline"><span>01 CAPTURE ✓</span><span>02 LOCAL ANALYSIS ✓</span><span>03 COLMAP / SfM</span><span>04 GAUSSIAN SPLAT</span><span>05 3D VIEWER</span></div>
+
+      <div className="pipeline">
+        <span>01 CAPTURE ✓</span>
+        <span>02 LOCAL ANALYSIS ✓</span>
+        <span className={['sfm', 'matching', 'features', 'extract'].includes(stage) ? 'active' : job?.registered_images ? 'done' : ''}>03 COLMAP / SfM {job?.registered_images ? '✓' : ''}</span>
+        <span className={stage === 'splat' ? 'active' : completed ? 'done' : ''}>04 GAUSSIAN SPLAT {completed ? '✓' : ''}</span>
+        <span className={completed ? 'done' : ''}>05 3D VIEWER {completed ? '✓' : ''}</span>
+      </div>
+
+      {job && <div className="workerPanel">
+        <div className="workerTop"><div><b>GPU RECONSTRUCTION</b><span>{job.status.replaceAll('_', ' ').toUpperCase()}</span></div><strong>{gpuProgress}%</strong></div>
+        <div className="progressTrack"><div style={{ width: `${gpuProgress}%` }} /></div>
+        <p>{job.message || 'Worker is processing the reconstruction.'}</p>
+        {job.registered_images !== undefined && job.extracted_frames !== undefined && <small>CAMERA REGISTRATION · {job.registered_images}/{job.extracted_frames} FRAMES · {Math.round((job.registration_ratio || 0) * 100)}%</small>}
+      </div>}
+
       {result.quality.warnings.length > 0 && <div className="warnings"><b>CAPTURE NOTES</b>{result.quality.warnings.map((w, i) => <p key={i}>↳ {w}</p>)}</div>}
-      {result.quality.warnings.length === 0 && <p className="note">No obvious capture-quality problems were detected in the sampled views. The footage can proceed to photogrammetry.</p>}
-      <p className="note">This local report is a preprocessing signal, not a guarantee of reconstruction success. Full FPS/frame metadata and final geometry will come from the reconstruction worker.</p>
+      {result.quality.warnings.length === 0 && <p className="note">No obvious capture-quality problems were detected in the sampled views. Final registration still depends on scene texture, overlap and camera motion.</p>}
+
+      {completed && artifactUrl && <div className="viewerSection">
+        <div className="viewerHeader"><div><p className="eyebrow">RECONSTRUCTED SCENE</p><h3>Explore the 3D world.</h3></div><span>GAUSSIAN PLY · WEBGL</span></div>
+        <SplatViewer url={artifactUrl} />
+      </div>}
+
+      {!completed && job?.status === 'colmap_ready' && <div className="warnings"><b>COLMAP COMPLETE</b><p>Camera poses and sparse geometry were recovered, but Gaussian Splat training is not configured on this worker yet. Set <code>GS_REPO</code> on the GPU host and run the job again.</p></div>}
+      <p className="note">The capture score is a preprocessing signal, not a guarantee of geometry quality. A valid reconstruction requires enough overlapping, textured viewpoints for SfM to register the scene.</p>
     </section>}
-    <footer>3DMAPPING / RESEARCH BUILD · LOCAL-FIRST ANALYSIS</footer>
+    <footer>3DMAPPING / RESEARCH BUILD · LOCAL CONTROL STATION + NVIDIA GPU WORKER</footer>
   </main>;
 }
