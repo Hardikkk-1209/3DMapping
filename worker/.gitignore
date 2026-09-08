@@ -1,0 +1,12 @@
+jobs/
+*.db
+*.jpg
+*.png
+*.ply
+*.splat
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+__pycache__/
