@@ -19,8 +19,10 @@ storage/uploads/
 storage/jobs/
 storage/models/
 storage/frames/
+worker/jobs/
 *.ply
 *.splat
+*.ksplat
 *.las
 *.laz
 
