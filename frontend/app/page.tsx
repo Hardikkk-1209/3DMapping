@@ -138,14 +138,11 @@ async function analyzeInBrowser(file: File): Promise<Report> {
     if (avgMotion < 2) warnings.push('Very little scene change was detected; ensure the camera moves around the subject.');
     if (duration < 10) warnings.push('Short footage may provide limited viewpoint coverage.');
 
-    const fps = Number.isFinite((video as HTMLVideoElement & { getVideoPlaybackQuality?: () => unknown }).getVideoPlaybackQuality?.() as number) ? 0 : 0;
-    const estimatedFps = duration > 0 ? Math.round((file.size / Math.max(1, duration)) / 1000 * 100) / 100 : fps;
-
     return {
       filename: file.name,
       bytes: file.size,
       status: 'browser-analyzed',
-      video: { width, height, fps: estimatedFps, frames: Math.round(duration * Math.max(1, estimatedFps)), duration_s: Math.round(duration * 100) / 100 },
+      video: { width, height, fps: 0, frames: 0, duration_s: Math.round(duration * 100) / 100 },
       sampling: { sampled_frames: count, usable_keyframes: usable, target_keyframes: Math.min(160, Math.max(24, Math.round(duration * 4))) },
       quality: {
         score,
@@ -198,11 +195,11 @@ export default function Home() {
   const verdict = score >= 75 ? 'RECONSTRUCTION READY' : score >= 50 ? 'REVIEW CAPTURE' : 'LOW CONFIDENCE';
 
   return <main>
-    <nav><strong>3D<span>MAPPING</span></strong><div>DRONE RECONSTRUCTION · 03</div></nav>
+    <nav><strong>3D<span>MAPPING</span></strong><div>DRONE RECONSTRUCTION · 04</div></nav>
     <section className="hero">
       <p className="eyebrow">DRONE → 3D RECONSTRUCTION</p>
       <h1>Turn aerial footage<br/><i>into a 3D world.</i></h1>
-      <p className="sub">Upload ordinary drone footage. The browser now performs the first capture-quality pass locally, so the interface works without a Python server. Reconstruction itself remains a separate GPU worker.</p>
+      <p className="sub">Upload ordinary drone footage. The browser performs the first capture-quality pass locally, so the interface works without a Python server. Reconstruction itself remains a separate GPU worker.</p>
       <div className="drop" onClick={() => inputRef.current?.click()} onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) setFile(f); }}>
         <input ref={inputRef} type="file" accept="video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska" hidden onChange={e => { setFile(e.target.files?.[0] || null); setResult(null); setError(''); }} />
         <div className="plus">+</div>
@@ -220,10 +217,10 @@ export default function Home() {
       </div>
       <div className="stats">
         <div><b>{result.video.width}×{result.video.height}</b><small>RESOLUTION</small></div>
-        <div><b>{result.video.fps || '—'}</b><small>FPS ESTIMATE</small></div>
-        <div><b>{result.video.frames || '—'}</b><small>FRAME ESTIMATE</small></div>
+        <div><b>—</b><small>FPS · METADATA WORKER</small></div>
+        <div><b>—</b><small>FRAME COUNT · METADATA WORKER</small></div>
         <div><b>{result.video.duration_s}s</b><small>DURATION</small></div>
-        <div><b>{result.sampling.usable_keyframes}</b><small>USABLE VIEWS</small></div>
+        <div><b>{result.sampling.usable_keyframes}</b><small>USABLE SAMPLED VIEWS</small></div>
       </div>
       <div className="metrics">
         <div><span>DETAIL ENERGY</span><strong>{result.quality.average_sharpness}</strong></div>
@@ -233,7 +230,7 @@ export default function Home() {
       <div className="pipeline"><span>01 CAPTURE ✓</span><span>02 LOCAL ANALYSIS ✓</span><span>03 COLMAP / SfM</span><span>04 GAUSSIAN SPLAT</span><span>05 3D VIEWER</span></div>
       {result.quality.warnings.length > 0 && <div className="warnings"><b>CAPTURE NOTES</b>{result.quality.warnings.map((w, i) => <p key={i}>↳ {w}</p>)}</div>}
       {result.quality.warnings.length === 0 && <p className="note">No obvious capture-quality problems were detected in the sampled views. The footage can proceed to photogrammetry.</p>}
-      <p className="note">This local report is a preprocessing signal, not a guarantee of reconstruction success. Final geometry quality depends on viewpoint coverage, texture, camera calibration and the reconstruction worker.</p>
+      <p className="note">This local report is a preprocessing signal, not a guarantee of reconstruction success. Full FPS/frame metadata and final geometry will come from the reconstruction worker.</p>
     </section>}
     <footer>3DMAPPING / RESEARCH BUILD · LOCAL-FIRST ANALYSIS</footer>
   </main>;
