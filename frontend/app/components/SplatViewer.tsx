@@ -6,8 +6,19 @@ type Props = { url: string };
 
 type ViewerLike = {
   addSplatScene: (url: string, options?: Record<string, unknown>) => Promise<unknown>;
+  update: () => void;
+  render: () => void;
   dispose?: () => void;
 };
+
+type RendererLike = {
+  setPixelRatio: (value: number) => void;
+  setSize: (width: number, height: number, updateStyle?: boolean) => void;
+  dispose: () => void;
+  domElement: HTMLCanvasElement;
+};
+
+type CameraLike = { aspect: number; updateProjectionMatrix: () => void };
 
 export default function SplatViewer({ url }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -17,8 +28,9 @@ export default function SplatViewer({ url }: Props) {
   useEffect(() => {
     let disposed = false;
     let viewer: ViewerLike | null = null;
-    let renderer: { dispose?: () => void; domElement?: HTMLCanvasElement } | null = null;
-    let camera: unknown = null;
+    let renderer: RendererLike | null = null;
+    let camera: CameraLike | null = null;
+    let frame = 0;
 
     async function mount() {
       if (!hostRef.current) return;
@@ -32,21 +44,22 @@ export default function SplatViewer({ url }: Props) {
 
         const width = Math.max(320, hostRef.current.clientWidth || 960);
         const height = Math.max(360, hostRef.current.clientHeight || 620);
-        renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-        renderer.setSize(width, height, false);
-        hostRef.current.appendChild(renderer.domElement);
+        const webgl = new THREE.WebGLRenderer({ antialias: false, alpha: true });
+        webgl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+        webgl.setSize(width, height, false);
+        renderer = webgl;
+        hostRef.current.appendChild(webgl.domElement);
 
         const threeScene = new THREE.Scene();
-        camera = new THREE.PerspectiveCamera(65, width / height, 0.01, 5000);
-        const threeCamera = camera as InstanceType<typeof THREE.PerspectiveCamera>;
+        const threeCamera = new THREE.PerspectiveCamera(65, width / height, 0.01, 5000);
         threeCamera.position.set(0, 0, 4);
         threeCamera.lookAt(0, 0, 0);
+        camera = threeCamera;
 
         viewer = new GaussianSplats3D.Viewer({
           selfDrivenMode: false,
           threeScene,
-          renderer,
+          renderer: webgl,
           camera: threeCamera,
           useBuiltInControls: true,
           sharedMemoryForWorkers: false,
@@ -70,11 +83,10 @@ export default function SplatViewer({ url }: Props) {
         setMessage('3D scene ready — drag to orbit, right-drag to pan, scroll to zoom.');
 
         const animate = () => {
-          if (disposed || !viewer || !renderer) return;
-          requestAnimationFrame(animate);
-          const v = viewer as unknown as { update: () => void; render: () => void };
-          v.update();
-          v.render();
+          if (disposed || !viewer) return;
+          frame = requestAnimationFrame(animate);
+          viewer.update();
+          viewer.render();
         };
         animate();
       } catch (error) {
@@ -91,18 +103,18 @@ export default function SplatViewer({ url }: Props) {
       const width = Math.max(320, hostRef.current.clientWidth);
       const height = Math.max(360, hostRef.current.clientHeight);
       renderer.setSize(width, height, false);
-      const c = camera as { aspect: number; updateProjectionMatrix: () => void };
-      c.aspect = width / height;
-      c.updateProjectionMatrix();
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
     };
     window.addEventListener('resize', resize);
 
     return () => {
       disposed = true;
+      cancelAnimationFrame(frame);
       window.removeEventListener('resize', resize);
       try { viewer?.dispose?.(); } catch {}
-      try { renderer?.dispose?.(); } catch {}
-      if (renderer?.domElement?.parentElement) renderer.domElement.parentElement.removeChild(renderer.domElement);
+      try { renderer?.dispose(); } catch {}
+      if (renderer?.domElement.parentElement) renderer.domElement.parentElement.removeChild(renderer.domElement);
     };
   }, [url]);
 
