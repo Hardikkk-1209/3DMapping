@@ -1,0 +1,20 @@
+[Unit]
+Description=3DMapping GPU Reconstruction Worker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/3dmapping-worker
+Environment=WORKER_ROOT=/opt/3dmapping-worker
+Environment=WORKER_HOST=0.0.0.0
+Environment=WORKER_PORT=8080
+Environment=GS_REPO=/opt/gaussian-splatting
+Environment=RECONSTRUCTION_FPS=4
+Environment=RECONSTRUCTION_MAX_FRAMES=160
+Environment=SPLAT_ITERATIONS=30000
+ExecStart=/usr/bin/python3 /opt/3dmapping-worker/worker/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
