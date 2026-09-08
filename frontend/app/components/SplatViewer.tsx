@@ -19,6 +19,7 @@ type RendererLike = {
 };
 
 type CameraLike = { aspect: number; updateProjectionMatrix: () => void };
+const WORKER_KEY = process.env.NEXT_PUBLIC_WORKER_API_KEY || '';
 
 export default function SplatViewer({ url }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -69,6 +70,8 @@ export default function SplatViewer({ url }: Props) {
           renderMode: GaussianSplats3D.RenderMode.Always,
           logLevel: GaussianSplats3D.LogLevel.None,
           sphericalHarmonicsDegree: 0,
+          inMemoryCompressionLevel: 2,
+          freeIntermediateSplatData: true,
         }) as unknown as ViewerLike;
 
         setMessage('Streaming Gaussian splats into the viewer…');
@@ -76,6 +79,7 @@ export default function SplatViewer({ url }: Props) {
           showLoadingUI: false,
           progressiveLoad: true,
           splatAlphaRemovalThreshold: 2,
+          headers: WORKER_KEY ? { 'X-3DMapping-Key': WORKER_KEY } : {},
         });
 
         if (disposed) return;
