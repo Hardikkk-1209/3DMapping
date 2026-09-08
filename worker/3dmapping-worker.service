@@ -5,6 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/3dmapping-worker
+EnvironmentFile=-/opt/3dmapping-worker/.env
 Environment=WORKER_ROOT=/opt/3dmapping-worker
 Environment=WORKER_HOST=0.0.0.0
 Environment=WORKER_PORT=8080
