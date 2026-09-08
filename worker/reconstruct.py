@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Drone video -> COLMAP/SfM -> Gaussian Splat reconstruction worker.
-
-The worker is deliberately GPU-hosted. It writes a small JSON state file after
- each stage so the web control station can show real progress instead of faking it.
-"""
+"""Drone video -> COLMAP/SfM -> Gaussian Splat reconstruction worker."""
 from __future__ import annotations
 
 import argparse
@@ -84,9 +80,7 @@ def extract_frames(video: Path, images: Path, fps: float, max_frames: int) -> in
 
 
 def sparse_model(sparse_root: Path) -> Path:
-    candidates = sorted(
-        p for p in sparse_root.iterdir() if p.is_dir() and p.name.isdigit()
-    ) if sparse_root.exists() else []
+    candidates = sorted(p for p in sparse_root.iterdir() if p.is_dir() and p.name.isdigit()) if sparse_root.exists() else []
     if not candidates:
         raise RuntimeError("COLMAP mapper produced no sparse model. The footage could not be registered.")
     return candidates[0]
@@ -102,10 +96,7 @@ def registered_images(model: Path) -> int:
 
 def analyze_model(model: Path) -> str:
     try:
-        output = subprocess.check_output(
-            ["colmap", "model_analyzer", "--path", str(model)],
-            text=True, stderr=subprocess.STDOUT,
-        )
+        output = subprocess.check_output(["colmap", "model_analyzer", "--path", str(model)], text=True, stderr=subprocess.STDOUT)
         print(output, flush=True)
         return output
     except subprocess.CalledProcessError as exc:
@@ -122,6 +113,7 @@ def train_splat(dataset: Path, output: Path, gs_repo: Path, iterations: int) -> 
         sys.executable, str(train), "-s", str(dataset), "-m", str(output),
         "--iterations", str(iterations),
         "--save_iterations", str(iterations),
+        "--disable_viewer",
     ], cwd=gs_repo)
     point_cloud = output / "point_cloud" / f"iteration_{iterations}" / "point_cloud.ply"
     if not point_cloud.exists():
@@ -153,13 +145,9 @@ def main() -> int:
         shutil.copy2(args.input, video)
 
     result = {
-        "status": "queued",
-        "stage": "queued",
-        "progress": 0,
-        "message": "Job accepted by reconstruction worker.",
-        "job": str(job),
-        "input": ffprobe(video),
-        "started_at_unix": started,
+        "status": "queued", "stage": "queued", "progress": 0,
+        "message": "Job accepted by reconstruction worker.", "job": str(job),
+        "input": ffprobe(video), "started_at_unix": started,
     }
     write_result(job, result)
 
@@ -169,63 +157,44 @@ def main() -> int:
         dense = job / "dense"
         database = job / "database.db"
 
-        update(result, job, status="running", stage="extract", progress=8,
-               message="Extracting sharp, evenly spaced frames from the drone video.")
+        update(result, job, status="running", stage="extract", progress=8, message="Extracting sharp, evenly spaced frames from the drone video.")
         extracted = extract_frames(video, images, args.fps, args.max_frames)
         if extracted < 12:
             raise RuntimeError(f"Only {extracted} frames were extracted; at least 12 are required.")
         result["extracted_frames"] = extracted
 
-        update(result, job, stage="features", progress=22,
-               message=f"Finding visual features in {extracted} reconstruction frames.")
-        run(["colmap", "feature_extractor", "--database_path", str(database),
-             "--image_path", str(images), "--ImageReader.single_camera", "1",
-             "--FeatureExtraction.use_gpu", "1"])
+        update(result, job, stage="features", progress=22, message=f"Finding visual features in {extracted} reconstruction frames.")
+        run(["colmap", "feature_extractor", "--database_path", str(database), "--image_path", str(images), "--ImageReader.single_camera", "1", "--FeatureExtraction.use_gpu", "1"])
 
-        update(result, job, stage="matching", progress=36,
-               message="Matching neighboring video frames with sequential overlap.")
-        run(["colmap", "sequential_matcher", "--database_path", str(database),
-             "--SequentialMatching.overlap", "10", "--FeatureMatching.use_gpu", "1"])
+        update(result, job, stage="matching", progress=36, message="Matching neighboring video frames with sequential overlap.")
+        run(["colmap", "sequential_matcher", "--database_path", str(database), "--SequentialMatching.overlap", "10", "--FeatureMatching.use_gpu", "1"])
 
-        update(result, job, stage="sfm", progress=50,
-               message="Estimating camera poses and building the sparse 3D model.")
+        update(result, job, stage="sfm", progress=50, message="Estimating camera poses and building the sparse 3D model.")
         sparse.mkdir(parents=True, exist_ok=True)
-        run(["colmap", "mapper", "--database_path", str(database),
-             "--image_path", str(images), "--output_path", str(sparse)])
+        run(["colmap", "mapper", "--database_path", str(database), "--image_path", str(images), "--output_path", str(sparse)])
         model = sparse_model(sparse)
         result["sparse_model"] = str(model)
         result["model_analysis"] = analyze_model(model)
 
         text_model = job / "sparse_text"
         text_model.mkdir(exist_ok=True)
-        run(["colmap", "model_converter", "--input_path", str(model),
-             "--output_path", str(text_model), "--output_type", "TXT"])
+        run(["colmap", "model_converter", "--input_path", str(model), "--output_path", str(text_model), "--output_type", "TXT"])
         reg = registered_images(text_model)
         result["registered_images"] = reg
         result["registration_ratio"] = round(reg / extracted, 4)
-        update(result, job, stage="sfm", progress=58,
-               message=f"Registered {reg}/{extracted} frames ({result['registration_ratio']:.0%}).")
+        update(result, job, stage="sfm", progress=58, message=f"Registered {reg}/{extracted} frames ({result['registration_ratio']:.0%}).")
 
         if result["registration_ratio"] < args.min_registration:
-            result["status"] = "insufficient_registration"
-            result["error"] = (
-                f"Only {reg}/{extracted} frames registered in SfM. "
-                "The capture needs more overlap, slower motion, texture, or additional viewpoints."
-            )
-            update(result, job, status="insufficient_registration", stage="sfm", progress=58,
-                   message=result["error"])
+            result["error"] = f"Only {reg}/{extracted} frames registered in SfM. The capture needs more overlap, slower motion, texture, or additional viewpoints."
+            update(result, job, status="insufficient_registration", stage="sfm", progress=58, message=result["error"])
             return 2
 
-        update(result, job, stage="prepare", progress=68,
-               message="Preparing the COLMAP scene for Gaussian Splatting.")
-        run(["colmap", "image_undistorter", "--image_path", str(images),
-             "--input_path", str(model), "--output_path", str(dense),
-             "--output_type", "COLMAP"])
+        update(result, job, stage="prepare", progress=68, message="Preparing the COLMAP scene for Gaussian Splatting.")
+        run(["colmap", "image_undistorter", "--image_path", str(images), "--input_path", str(model), "--output_path", str(dense), "--output_type", "COLMAP"])
         result["dense_workspace"] = str(dense)
 
         if args.skip_splat:
-            update(result, job, status="colmap_ready", stage="prepare", progress=72,
-                   message="COLMAP reconstruction is ready; Gaussian Splatting was skipped.")
+            update(result, job, status="colmap_ready", stage="prepare", progress=72, message="COLMAP reconstruction is ready; Gaussian Splatting was skipped.")
             result["duration_s"] = round(time.time() - started, 2)
             write_result(job, result)
             return 0
@@ -233,37 +202,28 @@ def main() -> int:
         gs_repo_env = os.environ.get("GS_REPO")
         if not gs_repo_env:
             result["splat_error"] = "GS_REPO is not configured; COLMAP reconstruction completed."
-            update(result, job, status="colmap_ready", stage="prepare", progress=72,
-                   message="COLMAP is ready. Configure GS_REPO on the GPU worker to train the Gaussian scene.")
+            update(result, job, status="colmap_ready", stage="prepare", progress=72, message="COLMAP is ready. Configure GS_REPO on the GPU worker to train the Gaussian scene.")
             result["duration_s"] = round(time.time() - started, 2)
             write_result(job, result)
             return 0
 
-        update(result, job, stage="splat", progress=76,
-               message=f"Training the Gaussian scene for {args.iterations:,} iterations.")
+        update(result, job, stage="splat", progress=76, message=f"Training the Gaussian scene for {args.iterations:,} iterations.")
         point_cloud = train_splat(dense, job / "splat", Path(gs_repo_env), args.iterations)
         result["splat_output"] = str(point_cloud)
         result["artifact"] = str(point_cloud.relative_to(job))
         result["artifact_name"] = point_cloud.name
         result["duration_s"] = round(time.time() - started, 2)
-        update(result, job, status="completed", stage="complete", progress=100,
-               message="Reconstruction completed. The Gaussian scene is ready for the web viewer.")
+        update(result, job, status="completed", stage="complete", progress=100, message="Reconstruction completed. The Gaussian scene is ready for the web viewer.")
         return 0
     except subprocess.CalledProcessError as exc:
         result["duration_s"] = round(time.time() - started, 2)
-        update(result, job, status="failed", progress=result.get("progress", 0),
-               message=f"A reconstruction command failed with exit code {exc.returncode}.")
         result["error"] = f"Command failed with exit code {exc.returncode}"
-        write_result(job, result)
-        print(f"ERROR: {result['error']}", file=sys.stderr, flush=True)
+        update(result, job, status="failed", progress=result.get("progress", 0), message=result["error"])
         return exc.returncode or 1
     except Exception as exc:
         result["duration_s"] = round(time.time() - started, 2)
-        update(result, job, status="failed", progress=result.get("progress", 0),
-               message=str(exc))
         result["error"] = str(exc)
-        write_result(job, result)
-        print(f"ERROR: {exc}", file=sys.stderr, flush=True)
+        update(result, job, status="failed", progress=result.get("progress", 0), message=str(exc))
         return 1
 
 
