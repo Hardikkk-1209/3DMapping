@@ -1,0 +1,28 @@
+# Node
+node_modules/
+.next/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Reconstruction data
+storage/uploads/
+storage/jobs/
+storage/models/
+storage/frames/
+*.ply
+*.splat
+*.las
+*.laz
+
+# OS
+.DS_Store
