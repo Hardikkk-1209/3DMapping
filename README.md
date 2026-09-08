@@ -1,41 +1,32 @@
 # 3DMapping
 
-A real drone-video-to-3D reconstruction platform.
-
-## Goal
-
-Upload general drone footage, analyze capture quality, reconstruct camera poses and scene geometry with established photogrammetry software, train a 3D Gaussian Splat, and visualize the resulting scene in a custom web frontend.
+A drone-video-to-3D reconstruction platform built around a lightweight web control station and a dedicated Linux/NVIDIA reconstruction worker.
 
 ## Architecture
 
 ```text
 Mac / Browser
     |
-    | video upload
+    | local capture analysis
+    | original video upload
     v
 GPU Reconstruction Worker (Linux + NVIDIA)
     |
     +-- FFmpeg / FFprobe
     +-- COLMAP feature extraction
     +-- COLMAP sequential matching
-    +-- COLMAP SfM / registration gate
-    +-- image undistortion
+    +-- COLMAP SfM + registration gate
+    +-- COLMAP undistortion
     +-- GraphDeco Gaussian Splatting
     |
     v
-PLY / SPLAT model + result.json
+result.json + Gaussian PLY
     |
     v
-Browser 3D viewer
+Browser WebGL Gaussian Splat viewer
 ```
 
-- **Frontend:** Next.js / React / TypeScript
-- **GPU worker:** Python orchestration + FFmpeg + COLMAP + Gaussian Splatting
-- **Photogrammetry:** COLMAP (SfM/MVS tooling)
-- **3D representation:** Gaussian Splatting
-- **Development:** Native macOS/Linux tools; no Docker required
-
-The Mac is the control station. It does not need CUDA, COLMAP, or Gaussian Splatting installed for the production workflow.
+The Mac is only the control station. It does not need CUDA, COLMAP, FFmpeg, or Gaussian Splatting installed for the production workflow.
 
 ## Frontend
 
@@ -47,25 +38,74 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-The first analysis stage runs locally in the browser and measures resolution, exposure, detail, motion, and usable sampled views.
+The browser performs a small local capture-quality pass, then uploads the original video to the configured GPU worker. The UI polls the real worker state and, when training succeeds, opens the generated Gaussian PLY in the browser viewer.
+
+### Configure the worker
+
+Copy `frontend/.env.example` to `frontend/.env.local` and set:
+
+```bash
+NEXT_PUBLIC_WORKER_URL=http://<GPU-HOST>:8080
+```
+
+For a worker on the same machine as the browser, use `http://localhost:8080`.
+
+Restart `npm run dev` after changing the environment variable.
 
 ## GPU worker
 
-The worker requires a Linux/NVIDIA machine with:
+Run the worker on a Linux/NVIDIA machine. Required host software:
 
 - FFmpeg + FFprobe
 - COLMAP 4.x recommended
-- NVIDIA CUDA drivers/toolkit as required by the installed COLMAP/3DGS builds
+- compatible NVIDIA driver/CUDA stack
 - Python 3.10+
-- A GraphDeco Gaussian Splatting checkout with its CUDA/Python dependencies
+- GraphDeco Gaussian Splatting checkout with its upstream Python/CUDA dependencies
 
-Set the GraphDeco checkout for the reconstruction process:
+The GraphDeco repository is intentionally not vendored into this project because it has its own license and heavyweight CUDA dependencies.
+
+Set:
 
 ```bash
 export GS_REPO=/opt/gaussian-splatting
 ```
 
-### Direct reconstruction test
+Validate the worker host:
+
+```bash
+chmod +x worker/setup-linux.sh
+./worker/setup-linux.sh
+```
+
+Start the HTTP worker:
+
+```bash
+export WORKER_ROOT=/opt/3dmapping-worker
+export GS_REPO=/opt/gaussian-splatting
+export RECONSTRUCTION_FPS=4
+export RECONSTRUCTION_MAX_FRAMES=160
+export SPLAT_ITERATIONS=30000
+python3 worker/server.py
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+### Worker API
+
+```text
+GET  /health
+POST /jobs
+GET  /jobs/{job_id}
+GET  /jobs/{job_id}/artifact/{relative_path}
+```
+
+`POST /jobs` accepts a multipart upload in the `video` field. The job endpoint returns real stage/progress information. The artifact endpoint supports HTTP byte ranges for large Gaussian PLY files.
+
+## Manual reconstruction
 
 ```bash
 python3 worker/reconstruct.py \
@@ -82,58 +122,33 @@ python3 worker/reconstruct.py \
   --skip-splat
 ```
 
-### HTTP worker gateway
+## Reconstruction pipeline
 
-Start the worker service on the GPU machine:
+1. Decode and inspect the uploaded video.
+2. Extract a bounded set of reconstruction frames.
+3. Extract local visual features with COLMAP.
+4. Sequentially match video frames.
+5. Estimate camera poses and sparse geometry with SfM.
+6. Measure the registered-image ratio.
+7. Stop early with a diagnostic if registration is insufficient.
+8. Undistort the registered scene.
+9. Train Gaussian Splatting on the NVIDIA GPU.
+10. Expose the final `point_cloud.ply` to the browser.
+11. Render the scene interactively with the web Gaussian Splat viewer.
 
-```bash
-export WORKER_ROOT=/opt/3dmapping-worker
-python3 worker/server.py
+## Quality gate
+
+The browser's capture score is only an early warning signal. The authoritative reconstruction gate is the number of video views that COLMAP can actually register into one consistent camera/scene solution.
+
+Weak footage can still fail because of motion blur, low texture, repeated viewpoints, rolling-shutter effects, insufficient overlap, or too little viewpoint diversity. The system reports those failures rather than presenting an empty or fabricated 3D result.
+
+## Repository layout
+
+```text
+frontend/                 Next.js control station + WebGL viewer
+worker/reconstruct.py     FFmpeg + COLMAP + 3DGS orchestration
+worker/server.py          upload, job status, and artifact HTTP gateway
+worker/setup-linux.sh     GPU host prerequisite validation
 ```
 
-It exposes:
-
-- `GET /health` — worker health
-- `POST /jobs` — multipart upload using field `video`; returns a job id
-- `GET /jobs/{job_id}` — reconstruction status and result metadata
-
-Useful environment variables:
-
-```bash
-export WORKER_PORT=8080
-export RECONSTRUCTION_FPS=4
-export RECONSTRUCTION_MAX_FRAMES=160
-export SPLAT_ITERATIONS=30000
-```
-
-The frontend can be pointed at this service with a public/reachable worker URL when the web-to-worker integration is enabled.
-
-## Reconstruction gate
-
-A browser capture score is only a preprocessing signal. The worker uses the **COLMAP registered-image ratio** as the authoritative SfM gate. If too few views register, expensive splat training is stopped and a diagnostic result is returned.
-
-This prevents the application from presenting a visually plausible but invalid reconstruction result.
-
-## Current milestone
-
-Implemented:
-
-1. Browser-local video decoding and capture analysis.
-2. Real FFmpeg frame extraction worker.
-3. Real COLMAP feature extraction, sequential matching, SfM, and registration validation.
-4. GPU-worker HTTP job gateway.
-5. Gaussian Splatting integration point.
-
-Next:
-
-- Connect the browser upload directly to the worker API.
-- Stream/poll reconstruction progress into the UI.
-- Serve generated `.ply/.splat` assets securely.
-- Add the interactive Gaussian Splat viewer.
-- Validate the complete pipeline on multiple drone captures.
-
-## Important limitation
-
-No 3D reconstruction system can guarantee a perfect model from literally every drone video. Successful reconstruction requires sufficient overlap, texture, viewpoint diversity, and image quality. The application therefore diagnoses weak captures instead of pretending a reconstruction succeeded.
-
-Reconstruction engines are invoked as external workers rather than reimplemented from scratch.
+No Docker is required.
