@@ -1,6 +1,18 @@
 # 3DMapping
 
-A drone-video-to-3D reconstruction platform built around a lightweight web control station and a dedicated Linux/NVIDIA reconstruction worker.
+A drone-video-to-3D reconstruction platform built around a lightweight web control station and a real COLMAP + Gaussian Splatting reconstruction pipeline.
+
+## $0 / Free GPU path
+
+If you do not have a local NVIDIA GPU, use the included Google Colab notebook:
+
+```text
+colab/3dmapping_free_colab.ipynb
+```
+
+Open it in Google Colab, select a free GPU runtime when one is available, upload a drone video, and run the cells in order. The notebook uses FFmpeg + COLMAP for camera reconstruction and Nerfstudio/Splatfacto for Gaussian Splat training, then exports a `.ply` for the project's browser viewer.
+
+Free Colab GPU availability and runtime limits vary, so this is intended for development/testing rather than a permanent worker. Download the generated `.ply` before the runtime ends.
 
 ## Architecture
 
@@ -10,14 +22,13 @@ Mac / Browser
     | local capture analysis
     | original video upload
     v
-GPU Reconstruction Worker (Linux + NVIDIA)
+GPU Reconstruction
     |
     +-- FFmpeg / FFprobe
     +-- COLMAP feature extraction
     +-- COLMAP sequential matching
     +-- COLMAP SfM + registration gate
-    +-- COLMAP undistortion
-    +-- GraphDeco Gaussian Splatting
+    +-- Gaussian Splatting
     |
     v
 result.json + Gaussian PLY
@@ -26,7 +37,7 @@ result.json + Gaussian PLY
 Browser WebGL Gaussian Splat viewer
 ```
 
-The Mac is only the control station. It does not need CUDA, COLMAP, FFmpeg, or Gaussian Splatting installed for the production workflow.
+For the production-style HTTP workflow, the reconstruction worker runs on Linux/NVIDIA. The Mac is only the control station and does not need CUDA, COLMAP, FFmpeg, or Gaussian Splatting installed locally.
 
 ## Frontend
 
@@ -38,7 +49,7 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-The browser performs a small local capture-quality pass, then uploads the original video to the configured GPU worker. The UI polls the real worker state and, when training succeeds, opens the generated Gaussian PLY in the browser viewer.
+The browser performs a small local capture-quality pass, then can upload the original video to a configured GPU worker. The UI polls real worker state and, when training succeeds, opens the generated Gaussian PLY in the browser viewer.
 
 ### Configure the worker
 
@@ -52,9 +63,21 @@ For a worker on the same machine as the browser, use `http://localhost:8080`.
 
 Restart `npm run dev` after changing the environment variable.
 
+## Free Colab workflow
+
+1. Open `colab/3dmapping_free_colab.ipynb` in Google Colab.
+2. Select a free GPU runtime if available.
+3. Run the setup/check cells.
+4. Upload `Stockflue Flyaround.mp4` or another test video.
+5. Run frame extraction, COLMAP, Splatfacto, and export cells in order.
+6. Download the resulting `.ply`.
+7. Load that `.ply` in the 3DMapping viewer.
+
+The notebook starts with a conservative 3 FPS / 15,000-iteration configuration so the first test has a realistic chance of fitting within a free runtime. Once the pipeline works, increase frame rate or training iterations for quality.
+
 ## GPU worker
 
-Run the worker on a Linux/NVIDIA machine. Required host software:
+Run the worker on a Linux/NVIDIA machine when a persistent HTTP reconstruction service is required. Required host software:
 
 - FFmpeg + FFprobe
 - COLMAP 4.x recommended
@@ -149,6 +172,8 @@ frontend/                 Next.js control station + WebGL viewer
 worker/reconstruct.py     FFmpeg + COLMAP + 3DGS orchestration
 worker/server.py          upload, job status, and artifact HTTP gateway
 worker/setup-linux.sh     GPU host prerequisite validation
+colab/3dmapping_free_colab.ipynb
+                          free Colab reconstruction path
 ```
 
 No Docker is required.
